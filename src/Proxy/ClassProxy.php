@@ -35,6 +35,11 @@ use TokenReflection\ReflectionProperty as ParsedProperty;
 class ClassProxy extends AbstractProxy
 {
     /**
+     * @var LazyAdvisorAccessor
+     */
+    protected static $accessor;
+
+    /**
      * Parent class reflection
      *
      * @var null|ParsedClass
@@ -122,6 +127,7 @@ class ClassProxy extends AbstractProxy
 
         $this->addInterface('\Go\Aop\Proxy');
         $this->addJoinpointsProperty();
+        $this->addJoinpointsDefinitionProperty();
 
         foreach ($classAdvices as $type => $typedAdvices) {
 
@@ -288,12 +294,9 @@ class ClassProxy extends AbstractProxy
      */
     protected static function wrapWithJoinPoints($classAdvices, $className)
     {
-        /** @var LazyAdvisorAccessor $accessor */
-        static $accessor = null;
-
         if (!self::$invocationClassMap) {
             $aspectKernel = AspectKernel::getInstance();
-            $accessor     = $aspectKernel->getContainer()->get('aspect.advisor.accessor');
+            self::$accessor = $aspectKernel->getContainer()->get('aspect.advisor.accessor');
             self::setMappings(
                 $aspectKernel->hasFeature(Features::USE_SPLAT_OPERATOR)
             );
@@ -309,7 +312,7 @@ class ClassProxy extends AbstractProxy
             foreach ($typedAdvices as $joinPointName => $advices) {
                 $filledAdvices = [];
                 foreach ($advices as $advisorName) {
-                    $filledAdvices[] = $accessor->$advisorName;
+                    $filledAdvices[] = self::$accessor->$advisorName;
                 }
 
                 $joinpoint = new self::$invocationClassMap[$joinPointType]($className, $joinPointName, $filledAdvices);
@@ -318,6 +321,30 @@ class ClassProxy extends AbstractProxy
         }
 
         return $joinPoints;
+    }
+
+    /**
+     * @param $advices
+     * @param $className
+     * @return Joinpoint
+     */
+    public static function createJoinPoint($joinPointType, $joinPointName, $advices, $className)
+    {
+        if (!self::$invocationClassMap) {
+            $aspectKernel = AspectKernel::getInstance();
+            self::$accessor = $aspectKernel->getContainer()->get('aspect.advisor.accessor');
+            self::setMappings(
+                $aspectKernel->hasFeature(Features::USE_SPLAT_OPERATOR)
+            );
+        }
+
+        $filledAdvices = [];
+        foreach ($advices as $advisorName) {
+            $filledAdvices[] = self::$accessor->$advisorName;
+        }
+
+        $joinpoint = new self::$invocationClassMap[$joinPointType]($className, $joinPointName, $filledAdvices);
+        return $joinpoint;
     }
 
     /**
@@ -398,6 +425,20 @@ class ClassProxy extends AbstractProxy
     }
 
     /**
+     * Adds a definition for joinpoints private property in the class
+     *
+     * @return void
+     */
+    protected function addJoinpointsDefinitionProperty()
+    {
+        $this->setProperty(
+            Property::IS_PUBLIC | Property::IS_STATIC,
+            '__joinPointsDefinition',
+            '[]'
+        );
+    }
+
+    /**
      * Override parent method with joinpoint invocation
      *
      * @param ParsedMethod $method Method reflection
@@ -437,7 +478,15 @@ class ClassProxy extends AbstractProxy
             $scope = "$scope, [$args]";
         }
 
-        $body .= "return self::\$__joinPoints['{$prefix}:{$method->name}']->__invoke($scope);";
+        $clazz = __CLASS__;
+        $body .= "if (!isset(self::\$__joinPoints['{$prefix}:{$method->name}'])) {
+    self::\$__joinPoints['{$prefix}:{$method->name}'] = \\$clazz::createJoinPoint("
+            . var_export($prefix, true) . ", "
+            . var_export($method->name, true) . ", "
+            . "self::\$__joinPointsDefinition['{$prefix}']['{$method->name}']"
+        . ", '\\\\' . __CLASS__ . '__AopProxied');
+}
+return self::\$__joinPoints['{$prefix}:{$method->name}']->__invoke($scope);";
 
         return $body;
     }
@@ -480,12 +529,20 @@ class ClassProxy extends AbstractProxy
             "}" // End of class definition
         );
 
+        $injectJointPointsCode = '\\' . __CLASS__ . "::injectJoinPoints('"
+            . $this->class->name . "',"
+            . var_export($this->advices, true) . ");";
+
+        $injectJointPointsDefinitionCode = '\\' . $this->class->name . "::\$__joinPointsDefinition = "
+            . var_export($this->advices, true) . ';';
+
+
         return $classCode
-            // Inject advices on call
+//            . PHP_EOL
+//            . $injectJointPointsCode
             . PHP_EOL
-            . '\\' . __CLASS__ . "::injectJoinPoints('"
-                . $this->class->name . "',"
-                . var_export($this->advices, true) . ");";
+            . $injectJointPointsDefinitionCode
+            ;
     }
 
     /**
